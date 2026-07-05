@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"os"
@@ -17,6 +18,17 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/libdns/libdns"
 )
+
+// httpClient форсит IPv4. В части сетей AAAA YC-эндпоинтов уводится в ::1 (IPv6-синк,
+// напр. для обхода блокировок RU-сегмента), и попытка по IPv6 ломает TLS — ходим по tcp4.
+var httpClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, "tcp4", addr)
+		},
+	},
+}
 
 type serviceConfig struct {
 	ID               string `json:"id"`
@@ -69,10 +81,9 @@ type zone struct {
 func doRequest(token string, request *http.Request) ([]byte, error) {
 	request.Header.Add("Authorization", fmt.Sprintf("Bearer %s", token))
 
-	client := &http.Client{}
 	reqDump, _ := httputil.DumpRequestOut(request, true)
 
-	response, err := client.Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -175,12 +186,7 @@ func upsertRecords(ctx context.Context, token string, zoneID string, rs []libdns
 	if err != nil {
 		return nil, err
 	}
-	data, err := doRequest(token, req)
-	if err != nil {
-		return nil, err
-	}
-	result := createRecordResponse{}
-	if err := json.Unmarshal(data, &result); err != nil {
+	if _, err := doRequest(token, req); err != nil {
 		return nil, err
 	}
 	// YC upsertRecordSets не возвращает записи в ответе — отдаём вход.
@@ -290,7 +296,7 @@ func getIAMToken(cfg serviceConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.Post(
+	resp, err := httpClient.Post(
 		"https://iam.api.cloud.yandex.net/iam/v1/tokens",
 		"application/json",
 		strings.NewReader(fmt.Sprintf(`{"jwt":"%s"}`, jot)),
